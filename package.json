@@ -1,6 +1,6 @@
 {
   "name": "@oof2510/llmjs",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "An easy to use wrapper for openrouter, groq, and mistral apis with memory management",
   "main": "ai.js",
   "scripts": {
