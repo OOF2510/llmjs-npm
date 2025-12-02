@@ -201,15 +201,15 @@ class Ai {
     *  requestTimeoutMs?: number
     * }} [options]
     */
-   constructor({
-     apiKey,
-     model = "meta-llama/llama-3.3-70b-instruct:free",
-     fallbackModels = [],
-     temperature = 0.7,
-     maxtokens = 1000,
-     defaultHeaders = {},
-     requestTimeoutMs = 20000,
-   } = {}) {
+    constructor({
+      apiKey,
+      model = "meta-llama/llama-3.3-70b-instruct:free",
+      fallbackModels = [],
+      temperature = 0.7,
+      maxTokens = 1000,
+      defaultHeaders = {},
+      requestTimeoutMs = 20000,
+    } = {}) {
      if (!apiKey) {
        throw new Error("apiKey is required for Ai");
      }
@@ -664,7 +664,7 @@ class GroqAi {
      model = "llama-3.1-70b-versatile",
      fallbackModels = [],
      temperature = 0.7,
-     maxtokens = 1000,
+     maxTokens = 1000,
      requestTimeoutMs = 20000,
    } = {}) {
      if (!apiKey) {
@@ -1046,7 +1046,7 @@ class MistralAi {
      model = "mistral-small-latest",
      fallbackModels = [],
      temperature = 0.7,
-     maxtokens = 1000,
+     maxTokens = 1000,
      requestTimeoutMs = 20000,
    } = {}) {
      if (!apiKey) {
