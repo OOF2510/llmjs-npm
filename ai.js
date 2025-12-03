@@ -1280,6 +1280,87 @@ class MistralAi {
     throw lastError || new Error("All Mistral models failed");
   }
 
+  /**
+   * Transcribes an audio file using Mistral Voxtral.
+   * @param {Object} options
+   * @param {string|Buffer|ReadableStream} options.file - Path, URL, buffer, or stream
+   * @param {string} [options.model="voxtral-mini-latest"]
+   * @param {string} [options.language]
+   * @param {Array<string>} [options.timestamp_granularities] - Timestamp granularities for transcription
+   * @returns {Promise<string>}
+   */
+  async transcribe({
+    file,
+    model = "voxtral-mini-latest",
+    language,
+    timestamp_granularities,
+  } = {}) {
+    if (!file) throw new Error("file is required for MistralAi.transcribe");
+
+    const params = { model };
+    if (language) params.language = language;
+    if (timestamp_granularities) params.timestamp_granularities = timestamp_granularities;
+
+    let inputFile = file;
+    if (file && typeof file.pipe === 'function') {
+      // it's a stream, read to buffer
+      inputFile = await new Promise((resolve, reject) => {
+        const chunks = [];
+        file.on('data', chunk => chunks.push(chunk));
+        file.on('end', () => resolve(Buffer.concat(chunks)));
+        file.on('error', reject);
+      });
+    }
+
+    if (typeof inputFile === "string") {
+      if (inputFile.startsWith("http")) {
+        params.fileUrl = inputFile;
+      } else {
+        // path
+        const fs = require("fs");
+        const path = require("path");
+        const content = fs.readFileSync(inputFile);
+        const fileName = path.basename(inputFile);
+        params.file = { fileName, content };
+      }
+    } else if (Buffer.isBuffer(inputFile)) {
+      // buffer
+      params.file = { fileName: "audio.mp3", content: inputFile };
+    } else {
+      throw new Error("file must be a string (path or URL), Buffer, or ReadableStream");
+    }
+
+    try {
+      const work = this.client.audio.transcriptions.complete(params);
+
+      const resp =
+        this.requestTimeoutMs > 0
+          ? await Promise.race([
+              work,
+              new Promise((_, reject) =>
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `Mistral transcription timed out after ${this.requestTimeoutMs}ms`,
+                      ),
+                    ),
+                  this.requestTimeoutMs,
+                ),
+              ),
+            ])
+          : await work;
+
+      const text = resp?.text || "";
+      if (!text) throw new Error("Mistral transcription returned empty text");
+
+      return text.trim();
+    } catch (err) {
+      console.error("[MistralAI] transcription failed:", err?.message || err);
+      throw err;
+    }
+  }
+
   async classify(
     inputs,
     { model = "mistral-moderation-latest", requestTimeoutMs } = {},
@@ -1309,10 +1390,10 @@ class MistralAi {
               setTimeout(
                 () =>
                   reject(
-                    new Error(
-                      `Moderation model ${model} timed out after ${timeout}ms`,
-                    ),
+                  new Error(
+                    `Moderation model ${model} timed out after ${timeout}ms`,
                   ),
+                ),
                 timeout,
               ),
             ),
