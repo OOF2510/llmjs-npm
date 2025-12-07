@@ -12,7 +12,7 @@ const { MongoClient } = require("mongodb");
  * Default headers we send up with every OpenRouter call so the service knows who's pinging it.
  */
 const DEFAULT_HEADERS = {
-  "HTTP-Referer": "https://npmjs.com/package/llmjs",
+  "HTTP-Referer": "https://npmjs.com/package/@oof2510/llmjs",
   "X-Title": "LLM.js",
 };
 
@@ -199,6 +199,7 @@ class Ai {
     *  maxTokens?: number,
     *  defaultHeaders?: Record<string, string>,
     *  requestTimeoutMs?: number
+    *  firstToFinish?: boolean
     * }} [options]
     */
     constructor({
@@ -209,6 +210,7 @@ class Ai {
       maxTokens = 1000,
       defaultHeaders = {},
       requestTimeoutMs = 20000,
+      firstToFinish = false,
     } = {}) {
      if (!apiKey) {
        throw new Error("apiKey is required for Ai");
@@ -224,6 +226,7 @@ class Ai {
      // doesn't respond within this window we try the next configured model.
      // Default: 20000ms (20s). A value of 0 disables the timeout.
      this.requestTimeoutMs = Number(requestTimeoutMs) || 0;
+     this.firstToFinish = firstToFinish;
    }
 
   /**
@@ -497,55 +500,113 @@ class Ai {
       throw new Error("No AI models configured");
     }
 
-    let lastError;
-    for (const model of this.models) {
-      try {
-        const client = this.getClient(model);
-        // Build messages once for this invocation
-        const builtMessages = this.buildMessages({
-          system,
-          user,
-          messages,
-          attachments,
-        });
+    const builtMessages = this.buildMessages({
+      system,
+      user,
+      messages,
+      attachments,
+    });
 
-        // If a request timeout is configured (>0) race the invoke against a timer
-        let response;
-        if (this.requestTimeoutMs > 0) {
-          let timer;
-          const work = client.invoke(builtMessages).then((res) => {
-            if (timer) clearTimeout(timer);
-            return res;
-          });
+    if (!this.firstToFinish || this.models.length === 1) {
+      let lastError;
+      for (const model of this.models) {
+        try {
+          const client = this.getClient(model);
 
-          const timeoutPromise = new Promise((_, reject) => {
-            timer = setTimeout(() => {
-              reject(
-                new Error(
-                  `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
-                ),
-              );
-            }, this.requestTimeoutMs);
-          });
+          let response;
+          if (this.requestTimeoutMs > 0) {
+            let timer;
+            const work = client.invoke(builtMessages).then((res) => {
+              if (timer) clearTimeout(timer);
+              return res;
+            });
 
-          response = await Promise.race([work, timeoutPromise]);
-        } else {
-          response = await client.invoke(builtMessages);
+            const timeoutPromise = new Promise((_, reject) => {
+              timer = setTimeout(() => {
+                reject(
+                  new Error(
+                    `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
+                  ),
+                );
+              }, this.requestTimeoutMs);
+            });
+
+            response = await Promise.race([work, timeoutPromise]);
+          } else {
+            response = await client.invoke(builtMessages);
+          }
+
+          const text = this.extractText(response)?.trim();
+          if (!text) {
+            throw new Error(`Empty response from ${model}`);
+          }
+          this.lastUsedModel = model;
+          return text;
+        } catch (error) {
+          lastError = error;
+          console.error(`[AI] ${model} failed:`, error?.message || error);
         }
-
-        const text = this.extractText(response)?.trim();
-        if (!text) {
-          throw new Error(`Empty response from ${model}`);
-        }
-        this.lastUsedModel = model;
-        return text;
-      } catch (error) {
-        lastError = error;
-        console.error(`[AI] ${model} failed:`, error?.message || error);
       }
+
+      throw lastError || new Error("All AI models failed");
     }
 
-    throw lastError || new Error("All AI models failed");
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let remaining = this.models.length;
+      let lastError;
+
+      for (const model of this.models) {
+        (async () => {
+          try {
+            const client = this.getClient(model);
+
+            let response;
+            if (this.requestTimeoutMs > 0) {
+              let timer;
+              const work = client.invoke(builtMessages).then((res) => {
+                if (timer) clearTimeout(timer);
+                return res;
+              });
+
+              const timeoutPromise = new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                  reject(
+                    new Error(
+                      `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
+                    ),
+                  );
+                }, this.requestTimeoutMs);
+              });
+
+              response = await Promise.race([work, timeoutPromise]);
+            } else {
+              response = await client.invoke(builtMessages);
+            }
+
+            const text = this.extractText(response)?.trim();
+            if (!text) {
+              throw new Error(`Empty response from ${model}`);
+            }
+
+            if (!settled) {
+              settled = true;
+              this.lastUsedModel = model;
+              resolve(text);
+            }
+          } catch (error) {
+            lastError = error;
+            console.error(`[AI] ${model} failed:`, error?.message || error);
+          } finally {
+            remaining -= 1;
+            if (!settled && remaining === 0) {
+              settled = true;
+              reject(lastError || new Error("All AI models failed"));
+            }
+          }
+        })();
+      }
+    });
   }
 }
 
@@ -659,6 +720,18 @@ class AiWithHistory extends Ai {
  * Same constructor shape, same ask() behavior, fallbacks included.
  */
 class GroqAi {
+  /**
+   * Sets up the Groq helper with model preferences and request defaults.
+   * @param {{
+   *  apiKey: string,
+   *  model?: string,
+   *  fallbackModels?: string[],
+   *  temperature?: number,
+   *  maxTokens?: number,
+   *  requestTimeoutMs?: number,
+   *  firstToFinish?: boolean
+   * }} [options]
+   */
   constructor({
      apiKey,
      model = "llama-3.1-70b-versatile",
@@ -666,6 +739,7 @@ class GroqAi {
      temperature = 0.7,
      maxTokens = 1000,
      requestTimeoutMs = 20000,
+     firstToFinish = false,
    } = {}) {
      if (!apiKey) {
        throw new Error("apiKey is required for GroqAi");
@@ -676,6 +750,7 @@ class GroqAi {
      this.requestTimeoutMs = Number(requestTimeoutMs) || 0;
      this.client = new Groq({ apiKey });
      this.lastUsedModel = null;
+     this.firstToFinish = firstToFinish;
    }
 
   /**
@@ -854,46 +929,103 @@ class GroqAi {
       groqMessages.push({ role: "user", content });
     }
 
-    let lastError;
-    for (const model of this.models) {
-      try {
-        const work = this.client.chat.completions.create({
-          model,
-          messages: groqMessages,
-          temperature: this.temperature,
-          max_tokens: this.maxTokens,
-        });
+    if (!this.firstToFinish || this.models.length === 1) {
+      let lastError;
+      for (const model of this.models) {
+        try {
+          const work = this.client.chat.completions.create({
+            model,
+            messages: groqMessages,
+            temperature: this.temperature,
+            max_tokens: this.maxTokens,
+          });
 
-        const resp =
-          this.requestTimeoutMs > 0
-            ? await Promise.race([
-                work,
-                new Promise((_, reject) =>
-                  setTimeout(
-                    () =>
-                      reject(
-                        new Error(
-                          `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
+          const resp =
+            this.requestTimeoutMs > 0
+              ? await Promise.race([
+                  work,
+                  new Promise((_, reject) =>
+                    setTimeout(
+                      () =>
+                        reject(
+                          new Error(
+                            `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
+                          ),
                         ),
-                      ),
-                    this.requestTimeoutMs,
+                      this.requestTimeoutMs,
+                    ),
                   ),
-                ),
-              ])
-            : await work;
+                ])
+              : await work;
 
-        const text = this.extractText(resp);
-        if (!text) throw new Error(`Empty response from ${model}`);
+          const text = this.extractText(resp);
+          if (!text) throw new Error(`Empty response from ${model}`);
 
-        this.lastUsedModel = model;
-        return text;
-      } catch (err) {
-        lastError = err;
-        console.error(`[GroqAI] ${model} failed:`, err?.message || err);
+          this.lastUsedModel = model;
+          return text;
+        } catch (err) {
+          lastError = err;
+          console.error(`[GroqAI] ${model} failed:`, err?.message || err);
+        }
       }
+
+      throw lastError || new Error("All Groq models failed");
     }
 
-    throw lastError || new Error("All Groq models failed");
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let remaining = this.models.length;
+      let lastError;
+
+      for (const model of this.models) {
+        (async () => {
+          try {
+            const work = this.client.chat.completions.create({
+              model,
+              messages: groqMessages,
+              temperature: this.temperature,
+              max_tokens: this.maxTokens,
+            });
+
+            const resp =
+              this.requestTimeoutMs > 0
+                ? await Promise.race([
+                    work,
+                    new Promise((_, reject) =>
+                      setTimeout(
+                        () =>
+                          reject(
+                            new Error(
+                              `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
+                            ),
+                          ),
+                        this.requestTimeoutMs,
+                      ),
+                    ),
+                  ])
+                : await work;
+
+            const text = this.extractText(resp);
+            if (!text) throw new Error(`Empty response from ${model}`);
+
+            if (!settled) {
+              settled = true;
+              this.lastUsedModel = model;
+              resolve(text);
+            }
+          } catch (err) {
+            lastError = err;
+            console.error(`[GroqAI] ${model} failed:`, err?.message || err);
+          } finally {
+            remaining -= 1;
+            if (!settled && remaining === 0) {
+              settled = true;
+              reject(lastError || new Error("All Groq models failed"));
+            }
+          }
+        })();
+      }
+    });
   }
 
   /**
@@ -921,10 +1053,14 @@ class GroqAi {
       input = file;
     }
 
-    try {
+    const models = model ? [model] : this.models.length ? this.models : [
+      "whisper-large-v3-turbo",
+    ];
+
+    const runOnce = async (targetModel) => {
       const work = this.client.audio.transcriptions.create({
         file: input,
-        model,
+        model: targetModel,
         temperature,
         response_format: "verbose_json",
       });
@@ -938,7 +1074,7 @@ class GroqAi {
                   () =>
                     reject(
                       new Error(
-                        `Groq transcription timed out after ${this.requestTimeoutMs}ms`,
+                        `Groq transcription model ${targetModel} timed out after ${this.requestTimeoutMs}ms`,
                       ),
                     ),
                   this.requestTimeoutMs,
@@ -948,13 +1084,52 @@ class GroqAi {
           : await work;
 
       const text = resp?.text || "";
-      if (!text) throw new Error("Groq transcription returned empty text");
-
+      if (!text) throw new Error(`Groq transcription returned empty text for ${targetModel}`);
       return text.trim();
-    } catch (err) {
-      console.error("[GroqAI] transcription failed:", err?.message || err);
-      throw err;
+    };
+
+    if (!this.firstToFinish || models.length === 1) {
+      let lastError;
+      for (const m of models) {
+        try {
+          const text = await runOnce(m);
+          this.lastUsedModel = m;
+          return text;
+        } catch (err) {
+          lastError = err;
+          console.error("[GroqAI] transcription failed:", err?.message || err);
+        }
+      }
+      throw lastError || new Error("All Groq transcription models failed");
     }
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let remaining = models.length;
+      let lastError;
+
+      for (const m of models) {
+        (async () => {
+          try {
+            const text = await runOnce(m);
+            if (!settled) {
+              settled = true;
+              this.lastUsedModel = m;
+              resolve(text);
+            }
+          } catch (err) {
+            lastError = err;
+            console.error("[GroqAI] transcription failed:", err?.message || err);
+          } finally {
+            remaining -= 1;
+            if (!settled && remaining === 0) {
+              settled = true;
+              reject(lastError || new Error("All Groq transcription models failed"));
+            }
+          }
+        })();
+      }
+    });
   }
 }
 
@@ -1041,6 +1216,18 @@ class GroqAiWithHistory extends GroqAi {
  * Same constructor shape, same ask() behavior, fallbacks included.
  */
 class MistralAi {
+  /**
+   * Sets up the Mistral helper with model preferences and request defaults.
+   * @param {{
+   *  apiKey: string,
+   *  model?: string,
+   *  fallbackModels?: string[],
+   *  temperature?: number,
+   *  maxTokens?: number,
+   *  requestTimeoutMs?: number,
+   *  firstToFinish?: boolean
+   * }} [options]
+   */
   constructor({
      apiKey,
      model = "mistral-small-latest",
@@ -1048,6 +1235,7 @@ class MistralAi {
      temperature = 0.7,
      maxTokens = 1000,
      requestTimeoutMs = 20000,
+     firstToFinish = false,
    } = {}) {
      if (!apiKey) {
        throw new Error("apiKey is required for MistralAi");
@@ -1058,6 +1246,7 @@ class MistralAi {
      this.requestTimeoutMs = Number(requestTimeoutMs) || 0;
      this.client = new Mistral({ apiKey });
      this.lastUsedModel = null;
+     this.firstToFinish = firstToFinish;
    }
 
   /**
@@ -1238,46 +1427,103 @@ class MistralAi {
       mistralMessages.push({ role: "user", content });
     }
 
-    let lastError;
-    for (const model of this.models) {
-      try {
-        const work = this.client.chat.complete({
-          model,
-          messages: mistralMessages,
-          temperature: this.temperature,
-          maxTokens: this.maxTokens,
-        });
+    if (!this.firstToFinish || this.models.length === 1) {
+      let lastError;
+      for (const model of this.models) {
+        try {
+          const work = this.client.chat.complete({
+            model,
+            messages: mistralMessages,
+            temperature: this.temperature,
+            maxTokens: this.maxTokens,
+          });
 
-        const resp =
-          this.requestTimeoutMs > 0
-            ? await Promise.race([
-                work,
-                new Promise((_, reject) =>
-                  setTimeout(
-                    () =>
-                      reject(
-                        new Error(
-                          `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
+          const resp =
+            this.requestTimeoutMs > 0
+              ? await Promise.race([
+                  work,
+                  new Promise((_, reject) =>
+                    setTimeout(
+                      () =>
+                        reject(
+                          new Error(
+                            `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
+                          ),
                         ),
-                      ),
-                    this.requestTimeoutMs,
+                      this.requestTimeoutMs,
+                    ),
                   ),
-                ),
-              ])
-            : await work;
+                ])
+              : await work;
 
-        const text = this.extractText(resp);
-        if (!text) throw new Error(`Empty response from ${model}`);
+          const text = this.extractText(resp);
+          if (!text) throw new Error(`Empty response from ${model}`);
 
-        this.lastUsedModel = model;
-        return text;
-      } catch (err) {
-        lastError = err;
-        console.error(`[MistralAI] ${model} failed:`, err?.message || err);
+          this.lastUsedModel = model;
+          return text;
+        } catch (err) {
+          lastError = err;
+          console.error(`[MistralAI] ${model} failed:`, err?.message || err);
+        }
       }
+
+      throw lastError || new Error("All Mistral models failed");
     }
 
-    throw lastError || new Error("All Mistral models failed");
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let remaining = this.models.length;
+      let lastError;
+
+      for (const model of this.models) {
+        (async () => {
+          try {
+            const work = this.client.chat.complete({
+              model,
+              messages: mistralMessages,
+              temperature: this.temperature,
+              maxTokens: this.maxTokens,
+            });
+
+            const resp =
+              this.requestTimeoutMs > 0
+                ? await Promise.race([
+                    work,
+                    new Promise((_, reject) =>
+                      setTimeout(
+                        () =>
+                          reject(
+                            new Error(
+                              `Model ${model} timed out after ${this.requestTimeoutMs}ms`,
+                            ),
+                          ),
+                        this.requestTimeoutMs,
+                      ),
+                    ),
+                  ])
+                : await work;
+
+            const text = this.extractText(resp);
+            if (!text) throw new Error(`Empty response from ${model}`);
+
+            if (!settled) {
+              settled = true;
+              this.lastUsedModel = model;
+              resolve(text);
+            }
+          } catch (err) {
+            lastError = err;
+            console.error(`[MistralAI] ${model} failed:`, err?.message || err);
+          } finally {
+            remaining -= 1;
+            if (!settled && remaining === 0) {
+              settled = true;
+              reject(lastError || new Error("All Mistral models failed"));
+            }
+          }
+        })();
+      }
+    });
   }
 
   /**
@@ -1331,30 +1577,83 @@ class MistralAi {
     }
 
     try {
-      const work = this.client.audio.transcriptions.complete(params);
+      const models = model ? [model] : this.models.length ? this.models : [
+        "voxtral-mini-latest",
+      ];
 
-      const resp =
-        this.requestTimeoutMs > 0
-          ? await Promise.race([
-              work,
-              new Promise((_, reject) =>
-                setTimeout(
-                  () =>
-                    reject(
-                      new Error(
-                        `Mistral transcription timed out after ${this.requestTimeoutMs}ms`,
+      const runOnce = async (targetModel) => {
+        const work = this.client.audio.transcriptions.complete({
+          ...params,
+          model: targetModel,
+        });
+
+        const resp =
+          this.requestTimeoutMs > 0
+            ? await Promise.race([
+                work,
+                new Promise((_, reject) =>
+                  setTimeout(
+                    () =>
+                      reject(
+                        new Error(
+                          `Mistral transcription model ${targetModel} timed out after ${this.requestTimeoutMs}ms`,
+                        ),
                       ),
-                    ),
-                  this.requestTimeoutMs,
+                    this.requestTimeoutMs,
+                  ),
                 ),
-              ),
-            ])
-          : await work;
+              ])
+            : await work;
 
-      const text = resp?.text || "";
-      if (!text) throw new Error("Mistral transcription returned empty text");
+        const text = resp?.text || "";
+        if (!text) throw new Error(`Mistral transcription returned empty text for ${targetModel}`);
+        return text.trim();
+      };
 
-      return text.trim();
+      if (!this.firstToFinish || models.length === 1) {
+        let lastError;
+        for (const m of models) {
+          try {
+            const text = await runOnce(m);
+            this.lastUsedModel = m;
+            return text;
+          } catch (err) {
+            lastError = err;
+            console.error("[MistralAI] transcription failed:", err?.message || err);
+          }
+        }
+        throw lastError || new Error("All Mistral transcription models failed");
+      }
+
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        let remaining = models.length;
+        let lastError;
+
+        for (const m of models) {
+          (async () => {
+            try {
+              const text = await runOnce(m);
+              if (!settled) {
+                settled = true;
+                this.lastUsedModel = m;
+                resolve(text);
+              }
+            } catch (err) {
+              lastError = err;
+              console.error("[MistralAI] transcription failed:", err?.message || err);
+            } finally {
+              remaining -= 1;
+              if (!settled && remaining === 0) {
+                settled = true;
+                reject(
+                  lastError || new Error("All Mistral transcription models failed"),
+                );
+              }
+            }
+          })();
+        }
+      });
     } catch (err) {
       console.error("[MistralAI] transcription failed:", err?.message || err);
       throw err;

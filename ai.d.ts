@@ -124,6 +124,13 @@ declare module "@oof2510/llmjs" {
     
     /** Request timeout in milliseconds (default: 20000) */
     requestTimeoutMs?: number;
+
+    /**
+     * When true, sends the prompt to all configured models in parallel and
+     * returns the first successful response instead of trying models
+     * sequentially.
+     */
+    firstToFinish?: boolean;
   }
 
   /**
@@ -292,6 +299,8 @@ declare module "@oof2510/llmjs" {
       temperature?: number;
       maxTokens?: number;
       requestTimeoutMs?: number;
+      /** Enable parallel racing across Groq models and return the first result */
+      firstToFinish?: boolean;
     });
 
     /**
@@ -386,6 +395,8 @@ declare module "@oof2510/llmjs" {
       temperature?: number;
       maxTokens?: number;
       requestTimeoutMs?: number;
+      /** Enable parallel racing across Groq models and return the first result */
+      firstToFinish?: boolean;
     });
 
     /**
@@ -435,6 +446,8 @@ declare module "@oof2510/llmjs" {
       temperature?: number;
       maxTokens?: number;
       requestTimeoutMs?: number;
+      /** Enable parallel racing across Mistral models and return the first result */
+      firstToFinish?: boolean;
     });
 
     /**
@@ -544,6 +557,8 @@ declare module "@oof2510/llmjs" {
       temperature?: number;
       maxTokens?: number;
       requestTimeoutMs?: number;
+      /** Enable parallel racing across Mistral models and return the first result */
+      firstToFinish?: boolean;
     });
 
     /**

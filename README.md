@@ -77,6 +77,7 @@ Creates a new AI instance for interacting with OpenRouter models.
   - `maxTokens` (number, optional): Maximum tokens to generate (default: 1000)
   - `defaultHeaders` (Record<string, string>, optional): Custom headers for requests
   - `requestTimeoutMs` (number, optional): Request timeout in milliseconds (default: 20000)
+  - `firstToFinish` (boolean, optional): When true, sends the prompt to all configured models in parallel and returns the first successful response instead of trying models sequentially
 
 #### Methods
 
@@ -272,6 +273,7 @@ Creates a new Groq AI instance.
   - `temperature` (number, optional): Sampling temperature (default: 0.7)
   - `maxTokens` (number, optional): Maximum tokens (default: 1000)
   - `requestTimeoutMs` (number, optional): Request timeout (default: 20000)
+  - `firstToFinish` (boolean, optional): When true, races all configured Groq models in parallel for each call and returns the first successful result
 - **Throws:** Error if apiKey missing
 
 #### Methods
@@ -354,6 +356,7 @@ Creates a new Mistral AI instance.
   - `temperature` (number, optional): Sampling temperature (default: 0.7)
   - `maxTokens` (number, optional): Maximum tokens (default: 1000)
   - `requestTimeoutMs` (number, optional): Request timeout (default: 20000)
+  - `firstToFinish` (boolean, optional): When true, races all configured Mistral models in parallel for each call and returns the first successful result
 - **Throws:** Error if apiKey missing
 
 #### Methods
@@ -492,6 +495,39 @@ const response = await ai.ask({
 - **temperature** (optional): Controls randomness (0-1)
 - **maxTokens** (optional): Limits response length
 - **requestTimeoutMs** (optional): Request timeout in milliseconds
+- **firstToFinish** (optional): If true, sends each request to all configured models in parallel and resolves with the first successful response (for both `ask` and, where supported, `transcribe`)
+
+### Parallel racing with firstToFinish
+
+When you configure multiple models, you can either try them one by one (sequential fallbacks, the default) or race them in parallel using `firstToFinish`:
+
+```javascript
+const ai = new Ai({
+  apiKey: 'your-openrouter-api-key',
+  model: 'primary-model',
+  fallbackModels: ['fallback-1', 'fallback-2'],
+  firstToFinish: true, // race all three models
+});
+
+const answer = await ai.ask({ user: 'Explain event loops in JS.' });
+
+const groq = new GroqAi({
+  apiKey: process.env.GROQ_API_KEY,
+  fallbackModels: ['llama-3.1-70b-versatile', 'llama-3.1-8b-instant'],
+  firstToFinish: true,
+});
+
+// Also used for transcription: will race across configured transcription models
+const text = await groq.transcribe({ file: 'audio.wav' });
+
+const mistral = new MistralAi({
+  apiKey: process.env.MISTRAL_API_KEY,
+  fallbackModels: ['mistral-small-latest', 'mistral-large-latest'],
+  firstToFinish: true,
+});
+
+const mistralAnswer = await mistral.ask({ user: 'Summarize this article.' });
+```
 
 ### Memory Configuration
 
