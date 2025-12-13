@@ -590,4 +590,169 @@ declare module "@oof2510/llmjs" {
      */
     clear(chatId: string | number): Promise<void>;
   }
+
+  /**
+   * API keys for the different providers supported by MultiProviderAi.
+   */
+  export interface MultiProviderApiKeys {
+    /** OpenRouter API key (for the Ai wrapper) */
+    openrouter?: string;
+    /** Mistral API key */
+    mistral?: string;
+    /** Groq API key */
+    groq?: string;
+  }
+
+  /**
+   * Primary model configuration for MultiProviderAi.
+   */
+  export interface MultiProviderModelConfig {
+    /** Provider to use for the primary model */
+    provider: "openrouter" | "mistral" | "groq";
+    /** Provider-specific model name */
+    name: string;
+  }
+
+  /**
+   * Fallback model configuration per provider for MultiProviderAi.
+   */
+  export interface MultiProviderFallbackModels {
+    /** Fallback models for OpenRouter (Ai) */
+    openrouter?: string[];
+    /** Fallback models for Mistral */
+    mistral?: string[];
+    /** Fallback models for Groq */
+    groq?: string[];
+  }
+
+  /**
+   * Configuration options for the MultiProviderAi helper.
+   */
+  export interface MultiProviderAiOptions {
+    /** API keys for each underlying provider */
+    apiKeys?: MultiProviderApiKeys;
+
+    /** Primary provider/model pair to prefer when available */
+    model?: MultiProviderModelConfig;
+
+    /** Per-provider fallback model lists */
+    fallbackModels?: MultiProviderFallbackModels;
+
+    /** Sampling temperature for generation (default: 0.7) */
+    temperature?: number;
+
+    /** Maximum number of tokens to generate (default: 1000) */
+    maxTokens?: number;
+
+    /** Request timeout in milliseconds (default: 20000) */
+    requestTimeoutMs?: number;
+
+    /**
+     * When true, sends the prompt to all configured providers in parallel and
+     * returns the first successful response instead of trying providers
+     * sequentially.
+     */
+    firstToFinish?: boolean;
+  }
+
+  /**
+   * High-level helper that can talk to multiple underlying providers (OpenRouter, Groq, Mistral)
+   * using a single, unified API.
+   */
+  export class MultiProviderAi {
+    /**
+     * Initializes the multi-provider helper with provider keys, model preferences, and defaults.
+     * @param options Multi-provider configuration options
+     */
+    constructor(options?: MultiProviderAiOptions);
+
+    /**
+     * Returns the list of providers that are currently configured, ordered by preference.
+     * The preferred provider (if configured) is first, followed by the remaining ones.
+     */
+    getOrderedProviders(): string[];
+
+    /**
+     * Sends a prompt to the configured providers using their own wrappers (Ai, GroqAi, MistralAi)
+     * and returns the first successful response, honoring the firstToFinish setting.
+     *
+     * @param options Prompt parameters including system/user text, prior messages, and attachments
+     * @returns Promise resolving to the AI response text
+     */
+    ask(options?: {
+      system?: string;
+      user?: any;
+      messages?: BaseMessage[];
+      attachments?: AiAttachment[];
+    }): Promise<string>;
+
+    /**
+     * Attempts audio transcription using any underlying provider that supports it (Groq/Mistral).
+     * Follows the same fallback/first-to-finish behavior as ask().
+     *
+     * @param options Provider-specific transcription parameters
+     * @returns Promise resolving to transcribed text
+     */
+    transcribe(options?: any): Promise<string>;
+
+    /**
+     * Runs content classification / moderation using the first provider that exposes a classify()
+     * method (currently Mistral).
+     *
+     * @param inputs Input text or array of texts to classify
+     * @param options Classification options passed through to the provider
+     */
+    classify(
+      inputs: string | string[],
+      options?: {
+        model?: string;
+        requestTimeoutMs?: number;
+      }
+    ): Promise<{ categories: Record<string, boolean>; scores: Record<string, number> }>;
+  }
+
+  /**
+   * Multi-provider AI helper that also persists and reuses per-chat history via AiMemoryStore.
+   */
+  export class MultiProviderAiWithHistory extends MultiProviderAi {
+    /**
+     * Initializes the multi-provider helper with history tracking capabilities.
+     * @param options History-enabled multi-provider configuration
+     */
+    constructor(options: {
+      memoryStore: AiMemoryStore;
+      memoryScope?: string;
+      historyLimit?: number;
+    } & MultiProviderAiOptions);
+
+    /**
+     * Formats stored content for use with LangChain message constructors.
+     * @param content Content to format
+     * @returns Formatted content object or string
+     */
+    formatStoredContent(content: string | Array<any> | Record<string, any>): string | Record<string, any>;
+
+    /**
+     * Executes a query with conversation history context and stores both user and assistant
+     * messages back into the configured AiMemoryStore.
+     *
+     * @param chatId Conversation identifier
+     * @param options Query parameters (system/user/attachments)
+     * @returns Promise resolving to AI response text
+     */
+    ask(
+      chatId: string | number,
+      options?: {
+        system?: string;
+        user?: any;
+        attachments?: AiAttachment[];
+      }
+    ): Promise<string>;
+
+    /**
+     * Clears stored conversation history for the given chat and scope.
+     * @param chatId Conversation identifier
+     */
+    clear(chatId: string | number): Promise<void>;
+  }
 }

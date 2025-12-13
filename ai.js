@@ -184,7 +184,6 @@ class AiMemoryStore {
 }
 
 
-
 /**
  * High-level wrapper for firing prompts at OpenRouter while handling fallbacks.
  */
@@ -1787,6 +1786,501 @@ class MistralAiWithHistory extends MistralAi {
   }
 }
 
+/**
+ * High-level helper that can talk to multiple underlying providers (OpenRouter, Groq, Mistral)
+ * using a single, unified API.
+ *
+ * It mirrors the behavior of the provider-specific helpers (Ai, GroqAi, MistralAi) while
+ * supporting cross-provider fallbacks and optional first-to-finish racing.
+ */
+class MultiProviderAi {
+  constructor({
+     apiKeys = {
+      openrouter: "",
+      mistral: "",
+      groq: "",
+     },
+     model = {
+      provider: "mistral",
+      name: "mistral-small-latest"
+     },
+     fallbackModels = {
+      openrouter: [],
+      mistral: [],
+      groq: []
+     },
+     temperature = 0.7,
+     maxTokens = 1000,
+     requestTimeoutMs = 20000,
+     firstToFinish = false,
+   } = {}) {
+     if (!apiKeys || typeof apiKeys !== "object") {
+       throw new Error("apiKeys must be a non-null object with provider keys");
+     }
+     this.temperature = temperature;
+     this.maxTokens = maxTokens;
+     this.requestTimeoutMs = Number(requestTimeoutMs) || 0;
+     this.firstToFinish = firstToFinish;
+
+     this.primaryProvider = model && typeof model === "object" ? model.provider : undefined;
+
+     this.clients = {};
+
+     const providerConfigs = {
+       openrouter: {
+         classRef: Ai,
+         modelKey: "openrouter",
+       },
+       mistral: {
+         classRef: MistralAi,
+         modelKey: "mistral",
+       },
+       groq: {
+         classRef: GroqAi,
+         modelKey: "groq",
+       },
+     };
+
+     for (const [provider, key] of Object.entries(apiKeys)) {
+       if (!key) continue;
+       const cfg = providerConfigs[provider];
+       if (!cfg) continue;
+
+       const isPrimary =
+         model &&
+         typeof model === "object" &&
+         model.provider === provider &&
+         typeof model.name === "string" &&
+         model.name.length > 0;
+
+       const ctorOptions = {
+         apiKey: key,
+         temperature: this.temperature,
+         maxTokens: this.maxTokens,
+         requestTimeoutMs: this.requestTimeoutMs,
+         firstToFinish: this.firstToFinish,
+       };
+
+       if (isPrimary) {
+         ctorOptions.model = model.name;
+       }
+
+       const fallbacks = fallbackModels?.[provider];
+       if (Array.isArray(fallbacks) && fallbacks.length) {
+         ctorOptions.fallbackModels = fallbacks;
+       }
+
+       this.clients[provider] = new cfg.classRef(ctorOptions);
+     }
+
+     this.lastUsedModel = null;
+   }
+
+   getOrderedProviders() {
+     const available = Object.keys(this.clients);
+     if (!available.length) return [];
+
+     const preferred = this.primaryProvider && available.includes(this.primaryProvider)
+       ? this.primaryProvider
+       : available[0];
+
+     const rest = available.filter((p) => p !== preferred);
+     return [preferred, ...rest];
+   }
+
+   async ask({ system, user, messages = [], attachments = [] } = {}) {
+     const providers = this.getOrderedProviders();
+     if (!providers.length) {
+       throw new Error("No AI providers configured for MultiProviderAi");
+     }
+
+     if (!this.firstToFinish || providers.length === 1) {
+       let lastError;
+       for (const provider of providers) {
+         const client = this.clients[provider];
+         if (!client || typeof client.ask !== "function") continue;
+         try {
+           const resp = await client.ask({ system, user, messages, attachments });
+           this.lastUsedModel = { provider, model: client.lastUsedModel || null };
+           return resp;
+         } catch (err) {
+           lastError = err;
+           console.error(`[MultiProviderAI] ${provider} failed:`, err?.message || err);
+         }
+       }
+       throw lastError || new Error("All AI providers failed");
+     }
+
+     return new Promise((resolve, reject) => {
+       let settled = false;
+       let remaining = providers.length;
+       let lastError;
+
+       for (const provider of providers) {
+         const client = this.clients[provider];
+         if (!client || typeof client.ask !== "function") {
+           remaining -= 1;
+           if (!settled && remaining === 0) {
+             reject(lastError || new Error("All AI providers failed"));
+           }
+           continue;
+         }
+
+         (async () => {
+           try {
+             const resp = await client.ask({ system, user, messages, attachments });
+             if (!settled) {
+               settled = true;
+               this.lastUsedModel = { provider, model: client.lastUsedModel || null };
+               resolve(resp);
+             }
+           } catch (err) {
+             lastError = err;
+             console.error(`[MultiProviderAI] ${provider} failed:`, err?.message || err);
+           } finally {
+             remaining -= 1;
+             if (!settled && remaining === 0) {
+               settled = true;
+               reject(lastError || new Error("All AI providers failed"));
+             }
+           }
+         })();
+       }
+     });
+   }
+
+   async transcribe(options = {}) {
+     const providers = this.getOrderedProviders().filter((p) =>
+       typeof this.clients[p]?.transcribe === "function",
+     );
+
+     if (!providers.length) {
+       throw new Error("No providers with transcribe() configured for MultiProviderAi");
+     }
+
+     if (!this.firstToFinish || providers.length === 1) {
+       let lastError;
+       for (const provider of providers) {
+         const client = this.clients[provider];
+         try {
+           const text = await client.transcribe(options);
+           this.lastUsedModel = { provider, model: client.lastUsedModel || null };
+           return text;
+         } catch (err) {
+           lastError = err;
+           console.error(
+             `[MultiProviderAI] transcription via ${provider} failed:`,
+             err?.message || err,
+           );
+         }
+       }
+       throw lastError || new Error("All transcription providers failed");
+     }
+
+     return new Promise((resolve, reject) => {
+       let settled = false;
+       let remaining = providers.length;
+       let lastError;
+
+       for (const provider of providers) {
+         const client = this.clients[provider];
+         (async () => {
+           try {
+             const text = await client.transcribe(options);
+             if (!settled) {
+               settled = true;
+               this.lastUsedModel = { provider, model: client.lastUsedModel || null };
+               resolve(text);
+             }
+           } catch (err) {
+             lastError = err;
+             console.error(
+               `[MultiProviderAI] transcription via ${provider} failed:`,
+               err?.message || err,
+             );
+           } finally {
+             remaining -= 1;
+             if (!settled && remaining === 0) {
+               settled = true;
+               reject(lastError || new Error("All transcription providers failed"));
+             }
+           }
+         })();
+       }
+     });
+   }
+
+   async classify(inputs, options = {}) {
+     if (inputs == null || (Array.isArray(inputs) && inputs.length === 0)) {
+       throw new Error("inputs is required for classify()");
+     }
+
+     const providers = this.getOrderedProviders().filter((p) =>
+       typeof this.clients[p]?.classify === "function",
+     );
+
+     if (!providers.length) {
+       throw new Error("No providers with classify() configured for MultiProviderAi");
+     }
+
+     const provider = providers[0];
+     const client = this.clients[provider];
+     const result = await client.classify(inputs, options);
+     this.lastUsedModel = { provider, model: client.lastUsedModel || null };
+     return result;
+   }
+ }
+
+/**
+ * Multi-provider AI helper that also persists and reuses per-chat history via AiMemoryStore.
+ *
+ * This behaves like AiWithHistory/GroqAiWithHistory/MistralAiWithHistory but delegates the
+ * actual completion work to MultiProviderAi so you can seamlessly span providers.
+ */
+class MultiProviderAiWithHistory extends MultiProviderAi {
+  formatStoredContent(content) {
+    if (Array.isArray(content)) {
+      return { content };
+    }
+    if (content && typeof content === "object" && "content" in content) {
+      return content;
+    }
+    return content;
+  }
+
+  constructor({
+    memoryStore,
+    memoryScope = "default",
+    historyLimit = 10,
+    ...options
+  } = {}) {
+    if (!memoryStore) {
+      throw new Error("memoryStore is required for MultiProviderAiWithHistory");
+    }
+    super(options);
+    this.memoryStore = memoryStore;
+    this.memoryScope = memoryScope;
+    this.historyLimit = historyLimit;
+  }
+
+  ensureContentArray(content) {
+    if (Array.isArray(content)) {
+      return [...content];
+    }
+    if (typeof content === "string" && content.length) {
+      return [{ type: "text", text: content }];
+    }
+    return [];
+  }
+
+  toBase64(data) {
+    if (!data) return null;
+    if (Buffer.isBuffer(data)) {
+      return data.toString("base64");
+    }
+    if (typeof data === "string") {
+      const trimmed = data.trim();
+      if (!trimmed) return null;
+      if (trimmed.startsWith("data:")) {
+        const base64Part = trimmed.substring(trimmed.indexOf(",") + 1);
+        return base64Part ? base64Part.trim() : null;
+      }
+      const base64Like = trimmed.replace(/\s+/g, "");
+      if (/^[A-Za-z0-9+/]+={0,2}$/.test(base64Like)) {
+        return base64Like;
+      }
+      return Buffer.from(trimmed).toString("base64");
+    }
+    return null;
+  }
+
+  toDataUri(data, mimeType) {
+    if (!data) return null;
+    if (typeof data === "string" && data.trim().startsWith("data:")) {
+      return data.trim();
+    }
+    const encoded = this.toBase64(data);
+    if (!encoded) return null;
+    return `data:${mimeType};base64,${encoded}`;
+  }
+
+  mimeTypeToFormat(mimeType) {
+    if (!mimeType) return undefined;
+    const [, subtype] = mimeType.split("/");
+    if (!subtype) return undefined;
+    return subtype.split(";")[0] || undefined;
+  }
+
+  normalizeAttachment(attachment) {
+    if (!attachment || !attachment.type) return null;
+    const type = String(attachment.type).toLowerCase();
+    const { url, data, mimeType, format } = attachment;
+
+    if (type === "image") {
+      if (url) {
+        return { type: "image_url", image_url: { url } };
+      }
+
+      const dataUri = this.toDataUri(data, mimeType || "image/png");
+      if (!dataUri) return null;
+      return { type: "image_url", image_url: { url: dataUri } };
+    }
+
+    if (type === "video") {
+      if (url) {
+        return { type: "input_video", video: { url } };
+      }
+
+      const encoded = this.toBase64(data);
+      if (!encoded) return null;
+      const payload = { data: encoded };
+      const resolvedFormat =
+        format || (mimeType ? this.mimeTypeToFormat(mimeType) : undefined);
+      if (resolvedFormat) {
+        payload.format = resolvedFormat;
+      }
+      return { type: "input_video", video: payload };
+    }
+
+    return null;
+  }
+
+  buildUserMessagePayload({ user, attachments = [] } = {}) {
+    const normalizedAttachments = Array.isArray(attachments)
+      ? attachments
+          .map((attachment) => this.normalizeAttachment(attachment))
+          .filter(Boolean)
+      : [];
+
+    if (user instanceof HumanMessage) {
+      if (!normalizedAttachments.length) {
+        return { message: user, contentForHistory: user.content };
+      }
+      const contentPieces = this.ensureContentArray(user.content).concat(
+        normalizedAttachments,
+      );
+      const rebuilt = new HumanMessage({
+        content: contentPieces,
+        additional_kwargs: user.additional_kwargs,
+        name: user.name,
+      });
+      return { message: rebuilt, contentForHistory: contentPieces };
+    }
+
+    if (Array.isArray(user)) {
+      const contentPieces = [...user, ...normalizedAttachments];
+      if (!contentPieces.length) {
+        return { message: null, contentForHistory: null };
+      }
+      return {
+        message: new HumanMessage({ content: contentPieces }),
+        contentForHistory: contentPieces,
+      };
+    }
+
+    if (
+      user &&
+      typeof user === "object" &&
+      user !== null &&
+      "content" in user
+    ) {
+      const baseContent = this.ensureContentArray(user.content).concat(
+        normalizedAttachments,
+      );
+      if (!baseContent.length) {
+        return { message: null, contentForHistory: null };
+      }
+      return {
+        message: new HumanMessage({
+          ...user,
+          content: baseContent,
+        }),
+        contentForHistory: baseContent,
+      };
+    }
+
+    const trimmedUser = typeof user === "string" ? user : undefined;
+
+    if (normalizedAttachments.length === 0) {
+      if (typeof trimmedUser === "string" && trimmedUser.length) {
+        return {
+          message: new HumanMessage(trimmedUser),
+          contentForHistory: trimmedUser,
+        };
+      }
+      return { message: null, contentForHistory: null };
+    }
+
+    const contentPieces = [];
+    if (typeof trimmedUser === "string" && trimmedUser.length) {
+      contentPieces.push({ type: "text", text: trimmedUser });
+    }
+    contentPieces.push(...normalizedAttachments);
+
+    if (!contentPieces.length) {
+      return { message: null, contentForHistory: null };
+    }
+
+    return {
+      message: new HumanMessage({ content: contentPieces }),
+      contentForHistory: contentPieces,
+    };
+  }
+
+  async ask(chatId, { system, user, attachments = [] } = {}) {
+    if (!chatId) {
+      throw new Error("chatId is required for MultiProviderAiWithHistory");
+    }
+
+    const historyEntries = await this.memoryStore.getHistory(
+      chatId,
+      this.memoryScope,
+      this.historyLimit,
+    );
+
+    const formattedHistory = historyEntries.map((entry) => {
+      const payload = this.formatStoredContent(entry.content);
+      return entry.role === "assistant"
+        ? new AIMessage(payload)
+        : new HumanMessage(payload);
+    });
+
+    const { contentForHistory } = this.buildUserMessagePayload({
+      user,
+      attachments,
+    });
+
+    const response = await super.ask({
+      system,
+      user,
+      attachments,
+      messages: formattedHistory,
+    });
+
+    const toPersist = [];
+    if (contentForHistory !== null && contentForHistory !== undefined) {
+      toPersist.push({ role: "user", content: contentForHistory });
+    }
+    if (response) {
+      toPersist.push({ role: "assistant", content: response });
+    }
+
+    if (toPersist.length) {
+      this.memoryStore
+        .appendMessages(chatId, this.memoryScope, toPersist)
+        .catch((err) => {
+          console.error("[MultiProvider Memory] Failed to persist chat:", err);
+        });
+    }
+
+    return response;
+  }
+
+  async clear(chatId) {
+    await this.memoryStore.clearHistory(chatId, this.memoryScope);
+  }
+}
+
 module.exports = {
   Ai,
   AiWithHistory,
@@ -1795,4 +2289,6 @@ module.exports = {
   GroqAiWithHistory,
   MistralAi,
   MistralAiWithHistory,
+  MultiProviderAi,
+  MultiProviderAiWithHistory,
 };
