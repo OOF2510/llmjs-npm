@@ -1842,36 +1842,41 @@ class MultiProviderAi {
      };
 
      for (const [provider, key] of Object.entries(apiKeys)) {
-       if (!key) continue;
-       const cfg = providerConfigs[provider];
-       if (!cfg) continue;
+      if (!key) continue;
+      const cfg = providerConfigs[provider];
+      if (!cfg) continue;
 
-       const isPrimary =
-         model &&
-         typeof model === "object" &&
-         model.provider === provider &&
-         typeof model.name === "string" &&
-         model.name.length > 0;
+      const isPrimary =
+        model &&
+        typeof model === "object" &&
+        model.provider === provider &&
+        typeof model.name === "string" &&
+        model.name.length > 0;
 
-       const ctorOptions = {
-         apiKey: key,
-         temperature: this.temperature,
-         maxTokens: this.maxTokens,
-         requestTimeoutMs: this.requestTimeoutMs,
-         firstToFinish: this.firstToFinish,
-       };
+      const ctorOptions = {
+        apiKey: key,
+        temperature: this.temperature,
+        maxTokens: this.maxTokens,
+        requestTimeoutMs: this.requestTimeoutMs,
+        firstToFinish: this.firstToFinish,
+      };
 
-       if (isPrimary) {
-         ctorOptions.model = model.name;
-       }
+      const fallbacks = fallbackModels?.[provider];
 
-       const fallbacks = fallbackModels?.[provider];
-       if (Array.isArray(fallbacks) && fallbacks.length) {
-         ctorOptions.fallbackModels = fallbacks;
-       }
+      if (isPrimary) {
+        ctorOptions.model = model.name;
+        if (Array.isArray(fallbacks) && fallbacks.length) {
+          ctorOptions.fallbackModels = fallbacks;
+        }
+      } else if (Array.isArray(fallbacks) && fallbacks.length) {
+        ctorOptions.model = fallbacks[0];
+        if (fallbacks.length > 1) {
+          ctorOptions.fallbackModels = fallbacks.slice(1);
+        }
+      }
 
-       this.clients[provider] = new cfg.classRef(ctorOptions);
-     }
+      this.clients[provider] = new cfg.classRef(ctorOptions);
+    }
 
      this.lastUsedModel = null;
    }
