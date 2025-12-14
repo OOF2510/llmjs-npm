@@ -24,7 +24,7 @@ pnpm add @oof2510/llmjs
 ### CommonJS
 
 ```javascript
-const { Ai, AiMemoryStore, AiWithHistory, GroqAi, MistralAi } = require('@oof2510/llmjs');
+const { Ai, AiMemoryStore, AiWithHistory, GroqAi, MistralAi, MultiProviderAi, MultiProviderAiWithHistory } = require('@oof2510/llmjs');
 
 // Basic AI usage
 const ai = new Ai({
@@ -43,7 +43,7 @@ console.log(response);
 ### ES6/TypeScript
 
 ```typescript
-import { Ai, AiMemoryStore, AiWithHistory, GroqAi, MistralAi } from '@oof2510/llmjs';
+import { Ai, AiMemoryStore, AiWithHistory, GroqAi, MistralAi, MultiProviderAi, MultiProviderAiWithHistory } from '@oof2510/llmjs';
 
 // Basic AI usage
 const ai = new Ai({
@@ -57,6 +57,83 @@ const response = await ai.ask({
 });
 
 console.log(response);
+```
+
+### Multi-Provider Usage
+
+```javascript
+// Multi-provider setup with fallbacks
+const multiAi = new MultiProviderAi({
+  apiKeys: {
+    openrouter: 'your-openrouter-key',
+    mistral: 'your-mistral-key', 
+    groq: 'your-groq-key'
+  },
+  model: {
+    provider: 'mistral',
+    name: 'mistral-small-latest'
+  },
+  fallbackModels: {
+    openrouter: ['meta-llama/llama-3.3-70b-instruct:free'],
+    mistral: ['mistral-large-latest'],
+    groq: ['llama-3.1-70b-versatile']
+  },
+  firstToFinish: true // Race all providers
+});
+
+const response = await multiAi.ask({
+  user: 'Explain quantum computing',
+  system: 'You are a physics professor.'
+});
+
+// Transcription using any available provider
+const transcription = await multiAi.transcribe({
+  file: audioBuffer,
+  model: 'whisper-large-v3-turbo'
+});
+
+// Classification using Mistral
+const moderation = await multiAi.classify([
+  'This is a safe message',
+  'This contains harmful content'
+]);
+```
+
+### Multi-Provider with History
+
+```javascript
+const memoryStore = new AiMemoryStore({
+  uri: 'mongodb://localhost:27017',
+  dbName: 'myapp',
+  collectionName: 'ai_memory'
+});
+
+const multiAiWithHistory = new MultiProviderAiWithHistory({
+  apiKeys: {
+    openrouter: 'your-openrouter-key',
+    mistral: 'your-mistral-key',
+    groq: 'your-groq-key'
+  },
+  model: {
+    provider: 'openrouter',
+    name: 'meta-llama/llama-3.3-70b-instruct:free'
+  },
+  memoryStore,
+  memoryScope: 'user123',
+  historyLimit: 20
+});
+
+// Chat with memory across providers
+await multiAiWithHistory.ask('chat1', { 
+  user: 'Remember my favorite color is blue' 
+});
+
+await multiAiWithHistory.ask('chat1', { 
+  user: 'What did I tell you about my preferences?' 
+});
+
+// Clear conversation history
+await multiAiWithHistory.clear('chat1');
 ```
 
 ## Class Documentation
@@ -430,6 +507,110 @@ Executes query with history context and stores response.
 ##### `clear(chatId)`
 
 Clears conversation history for a chat.
+
+- `chatId` (string|number, required): Conversation identifier
+- **Returns:** Promise<void>
+
+### MultiProviderAi Class
+
+High-level helper that can talk to multiple underlying providers (OpenRouter, Groq, Mistral) using a single, unified API. It mirrors the behavior of provider-specific helpers while supporting cross-provider fallbacks and optional first-to-finish racing.
+
+#### Constructor
+
+##### `new MultiProviderAi(options)`
+
+Creates a new multi-provider AI instance with unified API.
+
+- `options` (object, optional):
+  - `apiKeys` (object, optional): API keys for each provider
+    - `openrouter` (string, optional): OpenRouter API key
+    - `mistral` (string, optional): Mistral API key
+    - `groq` (string, optional): Groq API key
+  - `model` (object, optional): Primary provider/model configuration
+    - `provider` (string, required): "openrouter" | "mistral" | "groq" (default: "mistral")
+    - `name` (string, required): Provider-specific model name (default: "mistral-small-latest")
+  - `fallbackModels` (object, optional): Per-provider fallback models
+    - `openrouter` (string[], optional): OpenRouter fallback models
+    - `mistral` (string[], optional): Mistral fallback models
+    - `groq` (string[], optional): Groq fallback models
+  - `temperature` (number, optional): Sampling temperature (default: 0.7)
+  - `maxTokens` (number, optional): Maximum tokens to generate (default: 1000)
+  - `requestTimeoutMs` (number, optional): Request timeout in milliseconds (default: 20000)
+  - `firstToFinish` (boolean, optional): When true, races all configured providers in parallel and returns the first successful response
+
+#### Methods
+
+##### `ask(options)`
+
+Sends a prompt to configured providers with cross-provider fallback support.
+
+- `options` (object, optional):
+  - `system` (string, optional): System prompt
+  - `user` (any, optional): User message
+  - `messages` (BaseMessage[], optional): Additional message history
+  - `attachments` (AiAttachment[], optional): Media attachments
+- **Returns:** Promise<string> - AI response text
+- **Throws:** Error if no providers configured or all fail
+
+##### `transcribe(options)`
+
+Attempts audio transcription using any provider that supports it (Groq/Mistral).
+
+- `options` (object, optional): Provider-specific transcription parameters
+- **Returns:** Promise<string> - Transcribed text
+- **Throws:** Error if no providers with transcribe() configured or all fail
+
+##### `classify(inputs, options)`
+
+Runs content classification using the first provider that supports it (currently Mistral).
+
+- `inputs` (string|string[], required): Text inputs to classify
+- `options` (object, optional):
+  - `model` (string, optional): Classification model
+  - `requestTimeoutMs` (number, optional): Request timeout
+- **Returns:** Promise<{ categories: Record<string, boolean>, scores: Record<string, number> }> - Classification results
+- **Throws:** Error if inputs missing or no providers with classify() configured
+
+##### `getOrderedProviders()`
+
+Returns the list of configured providers ordered by preference.
+
+- **Returns:** Array<string> - Ordered provider names
+
+### MultiProviderAiWithHistory Class
+
+Extends `MultiProviderAi` with persistent memory capabilities across multiple providers.
+
+#### Constructor
+
+##### `new MultiProviderAiWithHistory(options)`
+
+Creates a new multi-provider AI instance with conversation history support.
+
+- `options` (object):
+  - `memoryStore` (AiMemoryStore, required): Memory store instance
+  - `memoryScope` (string, optional): Memory namespace (default: "default")
+  - `historyLimit` (number, optional): Messages to remember (default: 10)
+  - `...other MultiProviderAi options`
+- **Throws:** Error if memoryStore missing
+
+#### Methods
+
+##### `ask(chatId, options)`
+
+Executes query with history context across multiple providers and stores response.
+
+- `chatId` (string|number, required): Conversation identifier
+- `options` (object, optional):
+  - `system` (string, optional): System prompt
+  - `user` (any, optional): User message
+  - `attachments` (AiAttachment[], optional): Attachments
+- **Returns:** Promise<string> - AI response
+- **Throws:** Error if chatId missing
+
+##### `clear(chatId)`
+
+Clears conversation history for a chat across all providers.
 
 - `chatId` (string|number, required): Conversation identifier
 - **Returns:** Promise<void>
